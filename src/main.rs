@@ -6,9 +6,9 @@ use std::time::Instant;
 #[allow(unused_imports)]
 #[macro_use]
 extern crate vulkano;
-
 #[macro_use]
 extern crate vulkano_shader_derive;
+extern crate image;
 
 use vulkano::instance::Instance;
 use vulkano::instance::InstanceExtensions;
@@ -26,10 +26,19 @@ use vulkano::buffer::CpuAccessibleBuffer;
 use vulkano::command_buffer::AutoCommandBufferBuilder;
 use vulkano::command_buffer::CommandBuffer;
 
+use vulkano::pipeline::ComputePipeline;
+use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
+
 use vulkano::sync::GpuFuture;
 
+use vulkano::format::Format;
+use vulkano::image::Dimensions;
+use vulkano::image::StorageImage;
+
+use image::{ImageBuffer, Rgba};
+
 mod utils;
-use utils::print_elapsed;
+use utils::print_elapsed_and_reset;
 
 struct MyStruct {
     a: u32,
@@ -111,15 +120,9 @@ fn example_operation_copy(device: Arc<Device>, queue: Arc<Queue>) {
     assert_eq!(&*src_content, &*dest_content);
 }
 
-fn main() {
-    let (device, queue) = initialize();
-
-    buffer_creation(device.clone());
-
-    example_operation_copy(device.clone(), queue.clone());
-
-    // http://vulkano.rs/guide/compute-intro
-    let timer = Instant::now();
+// http://vulkano.rs/guide/compute-intro + following
+fn compute_operations(device: Arc<Device>, queue: Arc<Queue>) {
+    let timer = &mut Instant::now();
 
     let data_iter = 0 .. 65536;
     let data_buffer = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
@@ -128,14 +131,8 @@ fn main() {
     let shader = cs::Shader::load(device.clone())
         .expect("failed to create shader module");
 
-
-    use vulkano::pipeline::ComputePipeline;
-
     let compute_pipeline = Arc::new(ComputePipeline::new(device.clone(), &shader.main_entry_point(), &())
         .expect("failed to create compute pipeline"));
-
-
-    use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 
     let set = Arc::new(PersistentDescriptorSet::start(compute_pipeline.clone(), 0)
         .add_buffer(data_buffer.clone()).unwrap()
@@ -147,20 +144,17 @@ fn main() {
         .build().unwrap();
 
     let finished = command_buffer.execute(queue.clone()).unwrap();
-    print_elapsed("set up compute and execute", timer);
+    print_elapsed_and_reset("set up compute and execute", timer);
 
-    let timer = Instant::now();
     finished.then_signal_fence_and_flush().unwrap()
         .wait(None).unwrap();
-    print_elapsed("wait for compute execution", timer);
-    let timer = Instant::now();
+    print_elapsed_and_reset("wait for compute execution", timer);
 
     let content = data_buffer.read().unwrap();
     for (n, val) in content.iter().enumerate() {
         assert_eq!(*val, n as u32 * 12);
     }
-    print_elapsed("read back result", timer);
-
+    print_elapsed_and_reset("read back result", timer);
     println!("Everything succeeded!");
 }
 
@@ -183,4 +177,113 @@ void main() {
 }"
     ]
     struct Dummy;
+}
+
+#[allow(dead_code)]
+// http://vulkano.rs/guide/image-creation + following
+fn image_creation(device: Arc<Device>, queue: Arc<Queue>) {
+    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+                                  Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+
+    use vulkano::format::ClearValue;
+
+    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                         (0 .. 1024 * 1024 * 4).map(|_| 0u8))
+                                         .expect("failed to create buffer");
+
+    let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
+        .clear_color_image(image.clone(), ClearValue::Float([0.0, 0.0, 1.0, 1.0])).unwrap()
+        .copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
+        .build().unwrap();
+
+    let finished = command_buffer.execute(queue.clone()).unwrap();
+    finished.then_signal_fence_and_flush().unwrap()
+        .wait(None).unwrap();
+
+    let buffer_content = buf.read().unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    image.save("image.png").unwrap();
+}
+
+#[allow(dead_code)]
+mod mandelbrot {
+    #[derive(VulkanoShader)]
+    #[ty = "compute"]
+    #[src = "
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
+
+void main() {
+    vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
+    vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+
+    vec2 z = vec2(0.0, 0.0);
+    float i;
+    for (i = 0.0; i < 1.0; i += 0.005) {
+        z = vec2(
+            z.x * z.x - z.y * z.y + c.x,
+            z.y * z.x + z.x * z.y + c.y
+        );
+
+        if (length(z) > 4.0) {
+            break;
+        }
+    }
+
+    vec4 to_write = vec4(vec3(i), 1.0);
+    imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
+}"
+    ]
+    struct Dummy;
+}
+
+// http://vulkano.rs/guide/mandelbrot
+fn mandelbrot(device: Arc<Device>, queue: Arc<Queue>) {
+    let image = StorageImage::new(device.clone(), Dimensions::Dim2d { width: 1024, height: 1024 },
+                              Format::R8G8B8A8Unorm, Some(queue.family())).unwrap();
+
+    let shader = mandelbrot::Shader::load(device.clone())
+        .expect("failed to create shader module");
+
+    let compute_pipeline = Arc::new(ComputePipeline::new(device.clone(), &shader.main_entry_point(), &())
+        .expect("failed to create compute pipeline"));
+
+    let set = Arc::new(PersistentDescriptorSet::start(compute_pipeline.clone(), 0)
+        .add_image(image.clone()).unwrap()
+        .build().unwrap()
+    );
+
+    let buf = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                             (0 .. 1024 * 1024 * 4).map(|_| 0u8))
+                                             .expect("failed to create buffer");
+
+    let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
+        .dispatch([1024 / 8, 1024 / 8, 1], compute_pipeline.clone(), set.clone(), ()).unwrap()
+        .copy_image_to_buffer(image.clone(), buf.clone()).unwrap()
+        .build().unwrap();
+
+    let finished = command_buffer.execute(queue.clone()).unwrap();
+    finished.then_signal_fence_and_flush().unwrap()
+        .wait(None).unwrap();
+
+    let buffer_content = buf.read().unwrap();
+    let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
+    image.save("image.png").unwrap();
+}
+
+fn main() {
+    let (device, queue) = initialize();
+
+    buffer_creation(device.clone());
+
+    example_operation_copy(device.clone(), queue.clone());
+
+    compute_operations(device.clone(), queue.clone());
+
+    // image_creation(device.clone(), queue.clone());
+
+    mandelbrot(device.clone(), queue.clone());
 }

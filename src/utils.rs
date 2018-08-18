@@ -2,7 +2,7 @@
 
 use std::time::{ Instant, Duration };
 
-pub fn elapsed(start_time: Instant) -> String {
+pub fn elapsed(start_time: &Instant) -> String {
     let elapsed = start_time.elapsed();
     format_duration(elapsed)
 }
@@ -29,6 +29,11 @@ fn format_duration(duration: Duration) -> String {
 }
 
 #[allow(dead_code)]
-pub fn print_elapsed(message: &str, start_time: Instant) {
+pub fn print_elapsed(message: &str, start_time: &Instant) {
     println!("{:<30}{}", message, elapsed(start_time));
+}
+
+pub fn print_elapsed_and_reset(message: &str, start_time: &mut Instant) {
+    println!("{:<30}{}", message, elapsed(start_time));
+    *start_time = Instant::now();
 }
