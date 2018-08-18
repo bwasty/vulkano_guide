@@ -1,3 +1,7 @@
+#![allow(unused_variables)]
+
+use std::sync::Arc;
+
 #[macro_use]
 extern crate vulkano;
 
@@ -8,17 +12,22 @@ use vulkano::instance::PhysicalDevice;
 
 use vulkano::device::Device;
 use vulkano::device::DeviceExtensions;
+use vulkano::device::Queue;
 use vulkano::instance::Features;
 
 use vulkano::buffer::BufferUsage;
 use vulkano::buffer::CpuAccessibleBuffer;
+
+use vulkano::command_buffer::AutoCommandBufferBuilder;
 
 struct MyStruct {
     a: u32,
     b: bool,
 }
 
-fn main() {
+// http://vulkano.rs/guide/initialization
+// http://vulkano.rs/guide/device-creation
+fn initialize() -> (Arc<Device>, Arc<Queue>) {
     let instance = Instance::new(None, &InstanceExtensions::none(), None)
         .expect("failed to create instance");
 
@@ -37,8 +46,44 @@ fn main() {
                     [(queue_family, 0.5)].iter().cloned()).expect("failed to create device")
     };
 
-    let _queue = queues.next().unwrap();
+    let queue = queues.next().unwrap();
 
+    (device, queue)
+}
+
+fn main() {
+    let (device, queue) = initialize();
+
+    buffer_creation(device.clone());
+
+    // http://vulkano.rs/guide/example-operation
+    let source_content = 0 .. 64;
+    let source = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                                source_content).expect("failed to create buffer");
+
+    let dest_content = (0 .. 64).map(|_| 0);
+    let dest = CpuAccessibleBuffer::from_iter(device.clone(), BufferUsage::all(),
+                                              dest_content).expect("failed to create buffer");
+
+    let command_buffer = AutoCommandBufferBuilder::new(device.clone(), queue.family()).unwrap()
+        .copy_buffer(source.clone(), dest.clone()).unwrap()
+        .build().unwrap();
+
+    use vulkano::command_buffer::CommandBuffer;
+    let finished = command_buffer.execute(queue.clone()).unwrap();
+
+    use vulkano::sync::GpuFuture;
+
+    finished.then_signal_fence_and_flush().unwrap()
+        .wait(None).unwrap();
+
+    let src_content = source.read().unwrap();
+    let dest_content = dest.read().unwrap();
+    assert_eq!(&*src_content, &*dest_content);
+}
+
+// http://vulkano.rs/guide/buffer-creation
+fn buffer_creation(device: Arc<Device>) {
     let data = 12;
     let _buffer = CpuAccessibleBuffer::from_data(device.clone(), BufferUsage::all(), data)
         .expect("failed to create buffer");
