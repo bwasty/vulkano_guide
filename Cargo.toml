@@ -5,3 +5,4 @@ authors = ["Benjamin Wasty <benny.wasty@gmail.com>"]
 
 [dependencies]
 vulkano = "0.10.0"
+vulkano-shader-derive = "0.10.0"
