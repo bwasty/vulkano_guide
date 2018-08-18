@@ -9,14 +9,14 @@ extern crate vulkano;
 #[macro_use]
 extern crate vulkano_shader_derive;
 extern crate image;
+extern crate vulkano_win;
+extern crate winit;
 
 use vulkano::instance::Instance;
-use vulkano::instance::InstanceExtensions;
 
 use vulkano::instance::PhysicalDevice;
 
 use vulkano::device::Device;
-use vulkano::device::DeviceExtensions;
 use vulkano::device::Queue;
 use vulkano::instance::Features;
 
@@ -44,32 +44,6 @@ use utils::print_elapsed_and_reset;
 struct MyStruct {
     a: u32,
     b: bool,
-}
-
-// http://vulkano.rs/guide/initialization
-// http://vulkano.rs/guide/device-creation
-fn initialize() -> (Arc<Device>, Arc<Queue>) {
-    let instance = Instance::new(None, &InstanceExtensions::none(), None)
-        .expect("failed to create instance");
-
-    let physical = PhysicalDevice::enumerate(&instance).next().expect("no device available");
-
-    for family in physical.queue_families() {
-        println!("Found a queue family with {:?} queue(s)", family.queues_count());
-    }
-
-    let queue_family = physical.queue_families()
-        .find(|&q| q.supports_graphics())
-        .expect("couldn't find a graphical queue family");
-
-    let (device, mut queues) = {
-        Device::new(physical, &Features::none(), &DeviceExtensions::none(),
-                    [(queue_family, 0.5)].iter().cloned()).expect("failed to create device")
-    };
-
-    let queue = queues.next().unwrap();
-
-    (device, queue)
 }
 
 #[allow(dead_code)]
@@ -318,7 +292,34 @@ void main() {
 }
 
 fn main() {
-    let (device, queue) = initialize();
+    // http://vulkano.rs/guide/initialization
+    // http://vulkano.rs/guide/device-creation
+    let instance = {
+        let extensions = vulkano_win::required_extensions();
+        Instance::new(None, &extensions, None).expect("failed to create Vulkan instance")
+    };
+
+    let physical = PhysicalDevice::enumerate(&instance).next().expect("no device available");
+
+    for family in physical.queue_families() {
+        println!("Found a queue family with {:?} queue(s)", family.queues_count());
+    }
+
+    let queue_family = physical.queue_families()
+        .find(|&q| q.supports_graphics())
+        .expect("couldn't find a graphical queue family");
+
+    let (device, mut queues) = {
+        let device_ext = vulkano::device::DeviceExtensions {
+            khr_swapchain: true,
+            .. vulkano::device::DeviceExtensions::none()
+        };
+
+        Device::new(physical, &Features::none(), &device_ext,
+                    [(queue_family, 0.5)].iter().cloned()).expect("failed to create device")
+    };
+
+    let queue = queues.next().unwrap();
 
     // buffer_creation(device.clone());
 
@@ -422,4 +423,40 @@ fn main() {
     let buffer_content = buf.read().unwrap();
     let image = ImageBuffer::<Rgba<u8>, _>::from_raw(1024, 1024, &buffer_content[..]).unwrap();
     image.save("triangle.png").unwrap();
+
+
+    // http://vulkano.rs/guide/window
+    use vulkano_win::VkSurfaceBuild;
+    use winit::EventsLoop;
+    use winit::WindowBuilder;
+
+    let mut events_loop = EventsLoop::new();
+    let surface = WindowBuilder::new().build_vk_surface(&events_loop, instance.clone()).unwrap();
+
+    // http://localhost:8000/guide/swapchain-creation
+    let caps = surface.capabilities(physical)
+        .expect("failed to get surface capabilities");
+
+    let dimensions = caps.current_extent.unwrap_or([1280, 1024]);
+    let alpha = caps.supported_composite_alpha.iter().next().unwrap();
+    let format = caps.supported_formats[0].0;
+
+    use vulkano::swapchain;
+    use vulkano::swapchain::{Swapchain, SurfaceTransform, PresentMode};
+
+    let (swapchain, images) = Swapchain::new(device.clone(), surface.clone(),
+        caps.min_image_count, format, dimensions, 1, caps.supported_usage_flags, &queue,
+        SurfaceTransform::Identity, alpha, PresentMode::Fifo, true, None)
+        .expect("failed to create swapchain");
+
+    let (image_num, acquire_future) = swapchain::acquire_next_image(swapchain.clone(), None).unwrap();
+
+    events_loop.run_forever(|event| {
+        match event {
+            winit::Event::WindowEvent { event: winit::WindowEvent::CloseRequested, .. } => {
+                winit::ControlFlow::Break
+            },
+            _ => winit::ControlFlow::Continue,
+        }
+    });
 }
